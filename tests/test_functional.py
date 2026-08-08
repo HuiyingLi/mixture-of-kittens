@@ -290,6 +290,16 @@ def test_clamped_swiglu_bf16(
     if swiglu_limit > 0.0:
         for index in (3, 4, 6, 7):
             inputs[index].mul_(8.0)
+        # Exercise the inclusive clamp gradients at gate=limit and
+        # up={-limit, limit}; the remaining rows retain random coverage.
+        inputs[0][:, 0] = 1.0
+        for weights in (inputs[3], inputs[6]):
+            weights[..., :2, :].zero_()
+            weights[..., :2, 0] = swiglu_limit
+        for weights in (inputs[4], inputs[7]):
+            weights[..., :2, :].zero_()
+            weights[..., 0, 0] = swiglu_limit
+            weights[..., 1, 0] = -swiglu_limit
     (
         x,
         topk_experts,

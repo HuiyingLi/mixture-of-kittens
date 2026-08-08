@@ -609,32 +609,57 @@ static __device__ __forceinline__ void combine_kernel(
     }
 }
 
-template <bool CLAMPED>
-static __device__ __forceinline__ float swiglu_gate_value(float value, float limit) {
-    if constexpr (CLAMPED)
-        return fminf(value, limit);
-    return value;
-}
+struct swiglu_bwd_pair_result {
+    bf16_2 d_gate;
+    bf16_2 d_up;
+    float2 silu;
+    float2 up;
+};
 
 template <bool CLAMPED>
-static __device__ __forceinline__ float swiglu_up_value(float value, float limit) {
-    if constexpr (CLAMPED)
-        return fminf(fmaxf(value, -limit), limit);
-    return value;
-}
-
-template <bool CLAMPED>
-static __device__ __forceinline__ float swiglu_gate_grad(float value, float limit) {
-    if constexpr (CLAMPED)
-        return value <= limit ? 1.0f : 0.0f;
-    return 1.0f;
-}
-
-template <bool CLAMPED>
-static __device__ __forceinline__ float swiglu_up_grad(float value, float limit) {
-    if constexpr (CLAMPED)
-        return value >= -limit && value <= limit ? 1.0f : 0.0f;
-    return 1.0f;
+static __device__ __forceinline__ swiglu_bwd_pair_result swiglu_bwd_pair(
+    const float2 raw_gate,
+    const float2 raw_up,
+    const float2 d_hidden,
+    const float limit
+) {
+    float2 gate = raw_gate;
+    float2 up = raw_up;
+    float2 gate_grad = {1.0f, 1.0f};
+    float2 up_grad = {1.0f, 1.0f};
+    if constexpr (CLAMPED) {
+        gate = {fminf(raw_gate.x, limit), fminf(raw_gate.y, limit)};
+        up = {
+            fminf(fmaxf(raw_up.x, -limit), limit),
+            fminf(fmaxf(raw_up.y, -limit), limit),
+        };
+        gate_grad = {raw_gate.x <= limit ? 1.0f : 0.0f, raw_gate.y <= limit ? 1.0f : 0.0f};
+        up_grad = {
+            raw_up.x >= -limit && raw_up.x <= limit ? 1.0f : 0.0f,
+            raw_up.y >= -limit && raw_up.y <= limit ? 1.0f : 0.0f,
+        };
+    }
+    const float2 sigmoid = {
+        1.0f / (1.0f + __expf(-gate.x)),
+        1.0f / (1.0f + __expf(-gate.y)),
+    };
+    const float2 silu = {gate.x * sigmoid.x, gate.y * sigmoid.y};
+    const float2 dsilu = {
+        (1.0f - silu.x) * sigmoid.x + silu.x,
+        (1.0f - silu.y) * sigmoid.y + silu.y,
+    };
+    return {
+        __floats2bfloat162_rn(
+            gate_grad.x * dsilu.x * up.x * d_hidden.x,
+            gate_grad.y * dsilu.y * up.y * d_hidden.y
+        ),
+        __floats2bfloat162_rn(
+            up_grad.x * silu.x * d_hidden.x,
+            up_grad.y * silu.y * d_hidden.y
+        ),
+        silu,
+        up,
+    };
 }
 
 template <bool IS_SHARED, bool CLAMPED>
@@ -1065,28 +1090,9 @@ static __device__ __forceinline__ void swiglu_bwd_kernel(
                         const float2 raw_gate = __bfloat1622float2(gate_pairs[i]);
                         const float2 raw_up = __bfloat1622float2(up_pairs[i]);
                         const float2 d_hidden = __bfloat1622float2(d_hidden_pairs[i]);
-                        const float gate_x = fminf(raw_gate.x, swiglu_limit);
-                        const float gate_y = fminf(raw_gate.y, swiglu_limit);
-                        const float up_x = fminf(fmaxf(raw_up.x, -swiglu_limit), swiglu_limit);
-                        const float up_y = fminf(fmaxf(raw_up.y, -swiglu_limit), swiglu_limit);
-                        const float sigmoid_x = 1.0f / (1.0f + __expf(-gate_x));
-                        const float sigmoid_y = 1.0f / (1.0f + __expf(-gate_y));
-                        const float silu_x = gate_x * sigmoid_x;
-                        const float silu_y = gate_y * sigmoid_y;
-                        const float dsilu_x = (1.0f - silu_x) * sigmoid_x + silu_x;
-                        const float dsilu_y = (1.0f - silu_y) * sigmoid_y + silu_y;
-                        const float gate_grad_x = raw_gate.x <= swiglu_limit ? 1.0f : 0.0f;
-                        const float gate_grad_y = raw_gate.y <= swiglu_limit ? 1.0f : 0.0f;
-                        const float up_grad_x = raw_up.x >= -swiglu_limit && raw_up.x <= swiglu_limit ? 1.0f : 0.0f;
-                        const float up_grad_y = raw_up.y >= -swiglu_limit && raw_up.y <= swiglu_limit ? 1.0f : 0.0f;
-                        d_gate_pairs[i] = __floats2bfloat162_rn(
-                            gate_grad_x * dsilu_x * up_x * d_hidden.x,
-                            gate_grad_y * dsilu_y * up_y * d_hidden.y
-                        );
-                        d_up_pairs[i] = __floats2bfloat162_rn(
-                            up_grad_x * silu_x * d_hidden.x,
-                            up_grad_y * silu_y * d_hidden.y
-                        );
+                        const auto result = swiglu_bwd_pair<CLAMPED>(raw_gate, raw_up, d_hidden, swiglu_limit);
+                        d_gate_pairs[i] = result.d_gate;
+                        d_up_pairs[i] = result.d_up;
                     }
                 } else {
                     rt_fl<config::SWIGLU_Mb / config::NUM_WARPS, config::SWIGLU_Nb> gate, up, d_hidden;
@@ -1141,34 +1147,11 @@ static __device__ __forceinline__ void swiglu_bwd_kernel(
                         const float2 raw_gate = __bfloat1622float2(gate_pairs[j]);
                         const float2 raw_up = __bfloat1622float2(up_pairs[j]);
                         const float2 d_hidden = __bfloat1622float2(d_hidden_pairs[j]);
-                        const float2 gate = {
-                            swiglu_gate_value<CLAMPED>(raw_gate.x, swiglu_limit),
-                            swiglu_gate_value<CLAMPED>(raw_gate.y, swiglu_limit),
-                        };
-                        const float2 up = {
-                            swiglu_up_value<CLAMPED>(raw_up.x, swiglu_limit),
-                            swiglu_up_value<CLAMPED>(raw_up.y, swiglu_limit),
-                        };
-                        const float sigmoid_x = 1.0f / (1.0f + __expf(-gate.x));
-                        const float sigmoid_y = 1.0f / (1.0f + __expf(-gate.y));
-                        const float silu_x = gate.x * sigmoid_x;
-                        const float silu_y = gate.y * sigmoid_y;
-                        const float dsilu_x = (1.0f - silu_x) * sigmoid_x + silu_x;
-                        const float dsilu_y = (1.0f - silu_y) * sigmoid_y + silu_y;
-                        router_grad_partial += d_hidden.x * inv_router_weight * silu_x * up.x
-                                             + d_hidden.y * inv_router_weight * silu_y * up.y;
-                        const float gate_grad_x = swiglu_gate_grad<CLAMPED>(raw_gate.x, swiglu_limit);
-                        const float gate_grad_y = swiglu_gate_grad<CLAMPED>(raw_gate.y, swiglu_limit);
-                        const float up_grad_x = swiglu_up_grad<CLAMPED>(raw_up.x, swiglu_limit);
-                        const float up_grad_y = swiglu_up_grad<CLAMPED>(raw_up.y, swiglu_limit);
-                        d_gate_pairs[j] = __floats2bfloat162_rn(
-                            gate_grad_x * dsilu_x * up.x * d_hidden.x,
-                            gate_grad_y * dsilu_y * up.y * d_hidden.y
-                        );
-                        d_up_pairs[j] = __floats2bfloat162_rn(
-                            up_grad_x * silu_x * d_hidden.x,
-                            up_grad_y * silu_y * d_hidden.y
-                        );
+                        const auto result = swiglu_bwd_pair<CLAMPED>(raw_gate, raw_up, d_hidden, swiglu_limit);
+                        router_grad_partial += d_hidden.x * inv_router_weight * result.silu.x * result.up.x
+                                             + d_hidden.y * inv_router_weight * result.silu.y * result.up.y;
+                        d_gate_pairs[j] = result.d_gate;
+                        d_up_pairs[j] = result.d_up;
                     }
                     const auto *d_gate_words = reinterpret_cast<const uint32_t *>(d_gate_pairs);
                     const auto *d_up_words = reinterpret_cast<const uint32_t *>(d_up_pairs);
