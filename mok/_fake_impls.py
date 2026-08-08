@@ -133,6 +133,7 @@ def _dispatch_mlp_swiglu_combine_fwd_bf16_fake(
     num_comm_sms: int,
     macrobatch_size: int,
     minibatch_size: int,
+    swiglu_limit: float = 0.0,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor, torch.Tensor,
@@ -267,6 +268,7 @@ def _dispatch_mlp_swiglu_combine_bwd_bf16_fake(
     num_comm_sms: int,
     macrobatch_size: int,
     minibatch_size: int,
+    swiglu_limit: float = 0.0,
 ) -> tuple[
     torch.Tensor, torch.Tensor,
     torch.Tensor, torch.Tensor,

@@ -152,6 +152,7 @@ struct globals_fwd {
     const int num_comm_sms;
     const int macrobatch_size;
     const int minibatch_size;
+    const float swiglu_limit;
 
     __host__ inline dim3 grid() const {
         const int num_minibatches = (schedule_peer_rank.cols() + minibatch_size - 1) / minibatch_size; // across all macrobatches
@@ -268,6 +269,7 @@ struct globals_bwd {
     const int num_comm_sms;
     const int macrobatch_size;
     const int minibatch_size;
+    const float swiglu_limit;
 
     __host__ inline dim3 grid() const {
         const int capacity = schedule_peer_rank.cols();
@@ -622,6 +624,7 @@ static __device__ __forceinline__ void swiglu_fwd_kernel(
     const int num_tokens,
     const int macrobatch_size,
     const int minibatch_size,
+    const float swiglu_limit,
     const int macrobatch_idx,
     const int minibatch_idx,
     const int task_idx,
@@ -700,17 +703,40 @@ static __device__ __forceinline__ void swiglu_fwd_kernel(
             }
 
             if constexpr (!USE_ROUTED_MXFP8) {
-                rt_fl<config::SWIGLU_Mb / config::NUM_WARPS, config::SWIGLU_Nb> gate, up, denominator;
-                compute_group::load(gate, gate_smem[stage]);
-                compute_group::load(up, up_smem[stage]);
-                compute_group::mul(denominator, gate, -1.0f);
-                compute_group::exp(denominator, denominator);
-                compute_group::add(denominator, denominator, 1.0f);
-                compute_group::div(gate, gate, denominator);
-                compute_group::mul(gate, gate, up);
-                if (threadIdx.x == 0) tma::store_async_read_wait();
-                __syncthreads();
-                compute_group::store(hidden_smem, gate);
+                if (swiglu_limit > 0.0f) {
+                    if (threadIdx.x == 0) tma::store_async_read_wait();
+                    __syncthreads();
+                    const auto *gate_pairs = reinterpret_cast<const bf16_2 *>(gate_smem[stage].data);
+                    const auto *up_pairs = reinterpret_cast<const bf16_2 *>(up_smem[stage].data);
+                    auto *hidden_pairs = reinterpret_cast<bf16_2 *>(hidden_smem.data);
+                    #pragma unroll
+                    for (int i = threadIdx.x; i < config::SWIGLU_Mb * config::SWIGLU_Nb / 2; i += config::NUM_THREADS) {
+                        float2 gate = __bfloat1622float2(gate_pairs[i]);
+                        float2 up = __bfloat1622float2(up_pairs[i]);
+                        gate.x = fminf(gate.x, swiglu_limit);
+                        gate.y = fminf(gate.y, swiglu_limit);
+                        up.x = fminf(fmaxf(up.x, -swiglu_limit), swiglu_limit);
+                        up.y = fminf(fmaxf(up.y, -swiglu_limit), swiglu_limit);
+                        const float sigmoid_x = 1.0f / (1.0f + __expf(-gate.x));
+                        const float sigmoid_y = 1.0f / (1.0f + __expf(-gate.y));
+                        hidden_pairs[i] = __floats2bfloat162_rn(
+                            gate.x * sigmoid_x * up.x,
+                            gate.y * sigmoid_y * up.y
+                        );
+                    }
+                } else {
+                    rt_fl<config::SWIGLU_Mb / config::NUM_WARPS, config::SWIGLU_Nb> gate, up, denominator;
+                    compute_group::load(gate, gate_smem[stage]);
+                    compute_group::load(up, up_smem[stage]);
+                    compute_group::mul(denominator, gate, -1.0f);
+                    compute_group::exp(denominator, denominator);
+                    compute_group::add(denominator, denominator, 1.0f);
+                    compute_group::div(gate, gate, denominator);
+                    compute_group::mul(gate, gate, up);
+                    if (threadIdx.x == 0) tma::store_async_read_wait();
+                    __syncthreads();
+                    compute_group::store(hidden_smem, gate);
+                }
             } else {
                 const auto *gate_pairs = reinterpret_cast<const bf16_2 *>(gate_smem[stage].data);
                 const auto *up_pairs = reinterpret_cast<const bf16_2 *>(up_smem[stage].data);
@@ -795,6 +821,7 @@ static __device__ __forceinline__ void swiglu_bwd_kernel(
     const int num_tokens,
     const int macrobatch_size,
     const int minibatch_size,
+    const float swiglu_limit,
     const int macrobatch_idx,
     const int minibatch_idx,
     const int task_idx,
@@ -1017,23 +1044,59 @@ static __device__ __forceinline__ void swiglu_bwd_kernel(
                 }
                 __syncthreads();
             } else if constexpr (IS_SHARED) {
-                rt_fl<config::SWIGLU_Mb / config::NUM_WARPS, config::SWIGLU_Nb> gate, up, d_hidden;
-                compute_group::load(gate, gate_smem[stage]);
-                compute_group::mul(d_hidden, gate, -1.0f);
-                compute_group::exp(d_hidden, d_hidden);
-                compute_group::add(d_hidden, d_hidden, 1.0f);         // d_hidden := 1 / sigmoid(gate)
-                compute_group::div(gate, gate, d_hidden);             // gate := silu(gate)
-                compute_group::mul(up, gate, -1.0f);
-                compute_group::add(up, up, 1.0f);
-                compute_group::div(up, up, d_hidden);
-                compute_group::add(up, up, gate);                     // up := dsilu(gate)
-                compute_group::load(d_hidden, d_hidden_smem[stage]);
-                compute_group::mul(gate, gate, d_hidden);             // gate := d_up
-                compute_group::mul(d_hidden, d_hidden, up);
-                compute_group::load(up, up_smem[stage]);
-                compute_group::mul(d_hidden, d_hidden, up);           // d_hidden := d_gate
-                compute_group::store(gate_smem[stage], d_hidden);     // d_gate overwrites the gate tile in place
-                compute_group::store(up_smem[stage], gate);           // d_up overwrites the up tile in place
+                if (swiglu_limit > 0.0f) {
+                    const auto *gate_pairs = reinterpret_cast<const bf16_2 *>(gate_smem[stage].data);
+                    const auto *up_pairs = reinterpret_cast<const bf16_2 *>(up_smem[stage].data);
+                    const auto *d_hidden_pairs = reinterpret_cast<const bf16_2 *>(d_hidden_smem[stage].data);
+                    auto *d_gate_pairs = reinterpret_cast<bf16_2 *>(gate_smem[stage].data);
+                    auto *d_up_pairs = reinterpret_cast<bf16_2 *>(up_smem[stage].data);
+                    #pragma unroll
+                    for (int i = threadIdx.x; i < config::SWIGLU_Mb * config::SWIGLU_Nb / 2; i += config::NUM_THREADS) {
+                        const float2 raw_gate = __bfloat1622float2(gate_pairs[i]);
+                        const float2 raw_up = __bfloat1622float2(up_pairs[i]);
+                        const float2 d_hidden = __bfloat1622float2(d_hidden_pairs[i]);
+                        const float gate_x = fminf(raw_gate.x, swiglu_limit);
+                        const float gate_y = fminf(raw_gate.y, swiglu_limit);
+                        const float up_x = fminf(fmaxf(raw_up.x, -swiglu_limit), swiglu_limit);
+                        const float up_y = fminf(fmaxf(raw_up.y, -swiglu_limit), swiglu_limit);
+                        const float sigmoid_x = 1.0f / (1.0f + __expf(-gate_x));
+                        const float sigmoid_y = 1.0f / (1.0f + __expf(-gate_y));
+                        const float silu_x = gate_x * sigmoid_x;
+                        const float silu_y = gate_y * sigmoid_y;
+                        const float dsilu_x = (1.0f - silu_x) * sigmoid_x + silu_x;
+                        const float dsilu_y = (1.0f - silu_y) * sigmoid_y + silu_y;
+                        const float gate_grad_x = raw_gate.x <= swiglu_limit ? 1.0f : 0.0f;
+                        const float gate_grad_y = raw_gate.y <= swiglu_limit ? 1.0f : 0.0f;
+                        const float up_grad_x = raw_up.x >= -swiglu_limit && raw_up.x <= swiglu_limit ? 1.0f : 0.0f;
+                        const float up_grad_y = raw_up.y >= -swiglu_limit && raw_up.y <= swiglu_limit ? 1.0f : 0.0f;
+                        d_gate_pairs[i] = __floats2bfloat162_rn(
+                            gate_grad_x * dsilu_x * up_x * d_hidden.x,
+                            gate_grad_y * dsilu_y * up_y * d_hidden.y
+                        );
+                        d_up_pairs[i] = __floats2bfloat162_rn(
+                            up_grad_x * silu_x * d_hidden.x,
+                            up_grad_y * silu_y * d_hidden.y
+                        );
+                    }
+                } else {
+                    rt_fl<config::SWIGLU_Mb / config::NUM_WARPS, config::SWIGLU_Nb> gate, up, d_hidden;
+                    compute_group::load(gate, gate_smem[stage]);
+                    compute_group::mul(d_hidden, gate, -1.0f);
+                    compute_group::exp(d_hidden, d_hidden);
+                    compute_group::add(d_hidden, d_hidden, 1.0f);         // d_hidden := 1 / sigmoid(gate)
+                    compute_group::div(gate, gate, d_hidden);             // gate := silu(gate)
+                    compute_group::mul(up, gate, -1.0f);
+                    compute_group::add(up, up, 1.0f);
+                    compute_group::div(up, up, d_hidden);
+                    compute_group::add(up, up, gate);                     // up := dsilu(gate)
+                    compute_group::load(d_hidden, d_hidden_smem[stage]);
+                    compute_group::mul(gate, gate, d_hidden);             // gate := d_up
+                    compute_group::mul(d_hidden, d_hidden, up);
+                    compute_group::load(up, up_smem[stage]);
+                    compute_group::mul(d_hidden, d_hidden, up);           // d_hidden := d_gate
+                    compute_group::store(gate_smem[stage], d_hidden);     // d_gate overwrites the gate tile in place
+                    compute_group::store(up_smem[stage], gate);           // d_up overwrites the up tile in place
+                }
                 __syncthreads();
                 if (threadIdx.x == 0) {
                     tma::store_async(d_gate_gmem, gate_smem[stage], {row - macrobatch_row_block_offset, col});
@@ -1065,9 +1128,18 @@ static __device__ __forceinline__ void swiglu_bwd_kernel(
                     bf16_2 d_gate_pairs[2], d_up_pairs[2];
                     #pragma unroll
                     for (int j = 0; j < 2; ++j) {
-                        const float2 gate = __bfloat1622float2(gate_pairs[j]);
-                        const float2 up = __bfloat1622float2(up_pairs[j]);
+                        const float2 raw_gate = __bfloat1622float2(gate_pairs[j]);
+                        const float2 raw_up = __bfloat1622float2(up_pairs[j]);
                         const float2 d_hidden = __bfloat1622float2(d_hidden_pairs[j]);
+                        const float2 gate = swiglu_limit > 0.0f
+                            ? float2{fminf(raw_gate.x, swiglu_limit), fminf(raw_gate.y, swiglu_limit)}
+                            : raw_gate;
+                        const float2 up = swiglu_limit > 0.0f
+                            ? float2{
+                                fminf(fmaxf(raw_up.x, -swiglu_limit), swiglu_limit),
+                                fminf(fmaxf(raw_up.y, -swiglu_limit), swiglu_limit)
+                            }
+                            : raw_up;
                         const float sigmoid_x = 1.0f / (1.0f + __expf(-gate.x));
                         const float sigmoid_y = 1.0f / (1.0f + __expf(-gate.y));
                         const float silu_x = gate.x * sigmoid_x;
@@ -1076,8 +1148,20 @@ static __device__ __forceinline__ void swiglu_bwd_kernel(
                         const float dsilu_y = (1.0f - silu_y) * sigmoid_y + silu_y;
                         router_grad_partial += d_hidden.x * inv_router_weight * silu_x * up.x
                                              + d_hidden.y * inv_router_weight * silu_y * up.y;
-                        d_gate_pairs[j] = __floats2bfloat162_rn(dsilu_x * up.x * d_hidden.x, dsilu_y * up.y * d_hidden.y);
-                        d_up_pairs[j] = __floats2bfloat162_rn(silu_x * d_hidden.x, silu_y * d_hidden.y);
+                        const float gate_grad_x = swiglu_limit == 0.0f || raw_gate.x <= swiglu_limit ? 1.0f : 0.0f;
+                        const float gate_grad_y = swiglu_limit == 0.0f || raw_gate.y <= swiglu_limit ? 1.0f : 0.0f;
+                        const float up_grad_x = swiglu_limit == 0.0f
+                            || (raw_up.x >= -swiglu_limit && raw_up.x <= swiglu_limit) ? 1.0f : 0.0f;
+                        const float up_grad_y = swiglu_limit == 0.0f
+                            || (raw_up.y >= -swiglu_limit && raw_up.y <= swiglu_limit) ? 1.0f : 0.0f;
+                        d_gate_pairs[j] = __floats2bfloat162_rn(
+                            gate_grad_x * dsilu_x * up.x * d_hidden.x,
+                            gate_grad_y * dsilu_y * up.y * d_hidden.y
+                        );
+                        d_up_pairs[j] = __floats2bfloat162_rn(
+                            up_grad_x * silu_x * d_hidden.x,
+                            up_grad_y * silu_y * d_hidden.y
+                        );
                     }
                     const auto *d_gate_words = reinterpret_cast<const uint32_t *>(d_gate_pairs);
                     const auto *d_up_words = reinterpret_cast<const uint32_t *>(d_up_pairs);
@@ -1686,7 +1770,8 @@ static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_fwd_kernel(co
             swiglu_fwd_kernel<true>(g.gate_shared, g.up_shared, g.hidden_shared, nullptr, nullptr, nullptr,
                              g.gate_up_tile_ready, g.hidden_row_block_ready,
                              swiglu_inputs_arrived, swiglu_bitfield,
-                             g.x_shared.rows(), macrobatch_size, g.minibatch_size, 0, 0, task_idx, cta_rank, 0, 0, smem_base_addr);
+                             g.x_shared.rows(), macrobatch_size, g.minibatch_size, g.swiglu_limit,
+                             0, 0, task_idx, cta_rank, 0, 0, smem_base_addr);
         } else if (compute_cluster_idx < shared_tasks) {
             // Shared down (BF16)
             const int task_idx = compute_cluster_idx - shared_gate_up_tasks * 2 - shared_swiglu_tasks;
@@ -1738,7 +1823,8 @@ static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_fwd_kernel(co
                                   &g.hidden_sc_routed, &g.hidden_fp8_t_routed, &g.hidden_sc_t_routed,
                                   g.gate_up_tile_ready, g.hidden_row_block_ready,
                                   swiglu_inputs_arrived, swiglu_bitfield,
-                                  num_tokens, macrobatch_size, g.minibatch_size, macrobatch_idx, minibatch_idx, task_idx, cta_rank,
+                                  num_tokens, macrobatch_size, g.minibatch_size, g.swiglu_limit,
+                                  macrobatch_idx, minibatch_idx, task_idx, cta_rank,
                                   shared_gate_up_tasks, shared_row_blocks, smem_base_addr);
             } else {
                 // Routed down
@@ -1912,7 +1998,8 @@ dispatch_mlp_swiglu_combine_fwd_mxfp8(
         .topk = topk,
         .num_comm_sms = num_comm_sms,
         .macrobatch_size = macrobatch_size,
-        .minibatch_size = minibatch_size
+        .minibatch_size = minibatch_size,
+        .swiglu_limit = 0.0f
     };
 
     kittens::py::launch_kernel<config, globals_fwd, dispatch_mlp_swiglu_combine_fwd_kernel>(g);
@@ -1944,7 +2031,8 @@ dispatch_mlp_swiglu_combine_fwd_bf16(
     int topk,
     int num_comm_sms,
     int macrobatch_size,
-    int minibatch_size
+    int minibatch_size,
+    float swiglu_limit
 ) {
     static_assert(!USE_MXFP8);
     const int num_local_tokens = x.size(0);
@@ -2024,7 +2112,8 @@ dispatch_mlp_swiglu_combine_fwd_bf16(
         .topk = topk,
         .num_comm_sms = num_comm_sms,
         .macrobatch_size = macrobatch_size,
-        .minibatch_size = minibatch_size
+        .minibatch_size = minibatch_size,
+        .swiglu_limit = swiglu_limit
     };
 
     kittens::py::launch_kernel<config, globals_fwd, dispatch_mlp_swiglu_combine_fwd_kernel>(g);
@@ -2272,7 +2361,8 @@ static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_bwd_kernel(co
                              nullptr, nullptr, nullptr,
                              g.d_hidden_ready, nullptr, g.d_gate_up_ready, nullptr,
                              swiglu_bwd_inputs_arrived, swiglu_bwd_bitfield,
-                             g.gate_shared.rows(), macrobatch_size, g.minibatch_size, 0, 0, task_idx, cta_rank,
+                             g.gate_shared.rows(), macrobatch_size, g.minibatch_size, g.swiglu_limit,
+                             0, 0, task_idx, cta_rank,
                              0, 0, 0, 0, smem_base_addr);
         } else if (compute_cluster_idx < shared_dgrad_down_tasks + shared_swiglu_bwd_tasks + shared_dgrad_gate_up_tasks) {
             // Shared dgrad gate+up: d_x_shared = d_gate_shared @ w_shared_gate + d_up_shared @ w_shared_up
@@ -2354,7 +2444,8 @@ static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_bwd_kernel(co
                                       &g.hidden_sc_routed, &g.hidden_fp8_t_routed, &g.hidden_sc_t_routed,
                                       g.replayed_gate_up_ready, g.replayed_hidden_ready,
                                       swiglu_fwd_inputs_arrived, swiglu_fwd_bitfield,
-                                      num_tokens, macrobatch_size, g.minibatch_size, macrobatch_idx, minibatch_idx,
+                                      num_tokens, macrobatch_size, g.minibatch_size, g.swiglu_limit,
+                                      macrobatch_idx, minibatch_idx,
                                       task_idx, cta_rank, 0, 0, smem_base_addr);
                 }
             } else {
@@ -2382,7 +2473,8 @@ static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_bwd_kernel(co
                                       &g.router_weights, &g.d_router_weight_partials, &g.schedule_peer_rank,
                                       g.d_hidden_ready, replayed ? &g.replayed_gate_up_ready : nullptr, g.d_gate_up_ready, buffer_done,
                                       swiglu_bwd_inputs_arrived, swiglu_bwd_bitfield,
-                                      num_tokens, macrobatch_size, g.minibatch_size, macrobatch_idx, minibatch_idx,
+                                      num_tokens, macrobatch_size, g.minibatch_size, g.swiglu_limit,
+                                      macrobatch_idx, minibatch_idx,
                                       task_idx, cta_rank, shared_dgrad_down_tasks, 0, shared_row_blocks, macrobatch_idx, smem_base_addr);
                 } else if (routed_task_idx < num_routed_tasks) {
                     // Dgrad gate+up: d_x_routed = d_gate @ w_routed_gate + d_up @ w_routed_up
@@ -2680,7 +2772,8 @@ dispatch_mlp_swiglu_combine_bwd_mxfp8(
         .topk = topk,
         .num_comm_sms = num_comm_sms,
         .macrobatch_size = macrobatch_size,
-        .minibatch_size = minibatch_size
+        .minibatch_size = minibatch_size,
+        .swiglu_limit = 0.0f
     };
 
     kittens::py::launch_kernel<config, globals_bwd, dispatch_mlp_swiglu_combine_bwd_kernel>(g);
@@ -2733,7 +2826,8 @@ dispatch_mlp_swiglu_combine_bwd_bf16(
     int topk,
     int num_comm_sms,
     int macrobatch_size,
-    int minibatch_size
+    int minibatch_size,
+    float swiglu_limit
 ) {
     static_assert(!USE_MXFP8);
     const int num_local_tokens = x.size(0);
@@ -2868,7 +2962,8 @@ dispatch_mlp_swiglu_combine_bwd_bf16(
         .topk = topk,
         .num_comm_sms = num_comm_sms,
         .macrobatch_size = macrobatch_size,
-        .minibatch_size = minibatch_size
+        .minibatch_size = minibatch_size,
+        .swiglu_limit = swiglu_limit
     };
 
     kittens::py::launch_kernel<config, globals_bwd, dispatch_mlp_swiglu_combine_bwd_kernel>(g);
@@ -2988,7 +3083,8 @@ dispatch_mlp_swiglu_combine_fwd_bf16(
     int topk,
     int num_comm_sms,
     int macrobatch_size,
-    int minibatch_size
+    int minibatch_size,
+    float swiglu_limit
 ) {
     const int num_devices = static_cast<int>(x_ptrs.size());
     switch (num_devices) {
@@ -2997,31 +3093,31 @@ dispatch_mlp_swiglu_combine_fwd_bf16(
                 x, x_ptrs, combine_buffer, combine_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, num_comm_sms, macrobatch_size, minibatch_size, swiglu_limit);
         case 8:
             return dispatch_mlp_swiglu_combiner<8, utils::RoutedPrecision::BF16>::dispatch_mlp_swiglu_combine_fwd_bf16(
                 x, x_ptrs, combine_buffer, combine_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, num_comm_sms, macrobatch_size, minibatch_size, swiglu_limit);
         case 16:
             return dispatch_mlp_swiglu_combiner<16, utils::RoutedPrecision::BF16>::dispatch_mlp_swiglu_combine_fwd_bf16(
                 x, x_ptrs, combine_buffer, combine_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, num_comm_sms, macrobatch_size, minibatch_size, swiglu_limit);
         case 32:
             return dispatch_mlp_swiglu_combiner<32, utils::RoutedPrecision::BF16>::dispatch_mlp_swiglu_combine_fwd_bf16(
                 x, x_ptrs, combine_buffer, combine_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, num_comm_sms, macrobatch_size, minibatch_size, swiglu_limit);
         case 64:
             return dispatch_mlp_swiglu_combiner<64, utils::RoutedPrecision::BF16>::dispatch_mlp_swiglu_combine_fwd_bf16(
                 x, x_ptrs, combine_buffer, combine_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, num_comm_sms, macrobatch_size, minibatch_size, swiglu_limit);
         default:
             throw std::runtime_error("MoK: dispatch_mlp_swiglu_combine_fwd_bf16 unsupported num_devices=" +
                                      std::to_string(num_devices) + " (supported: 4, 8, 16, 32, 64)");
@@ -3209,7 +3305,8 @@ dispatch_mlp_swiglu_combine_bwd_bf16(
     int topk,
     int num_comm_sms,
     int macrobatch_size,
-    int minibatch_size
+    int minibatch_size,
+    float swiglu_limit
 ) {
     const int num_devices = static_cast<int>(x_ptrs.size());
     switch (num_devices) {
@@ -3220,7 +3317,7 @@ dispatch_mlp_swiglu_combine_bwd_bf16(
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 x_routed, gate_shared, gate_routed, up_shared, up_routed, hidden_shared, hidden_routed, x, x_ptrs,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, num_comm_sms, macrobatch_size, minibatch_size, swiglu_limit);
         case 8:
             return dispatch_mlp_swiglu_combiner<8, utils::RoutedPrecision::BF16>::dispatch_mlp_swiglu_combine_bwd_bf16(
                 d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
@@ -3228,7 +3325,7 @@ dispatch_mlp_swiglu_combine_bwd_bf16(
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 x_routed, gate_shared, gate_routed, up_shared, up_routed, hidden_shared, hidden_routed, x, x_ptrs,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, num_comm_sms, macrobatch_size, minibatch_size, swiglu_limit);
         case 16:
             return dispatch_mlp_swiglu_combiner<16, utils::RoutedPrecision::BF16>::dispatch_mlp_swiglu_combine_bwd_bf16(
                 d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
@@ -3236,7 +3333,7 @@ dispatch_mlp_swiglu_combine_bwd_bf16(
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 x_routed, gate_shared, gate_routed, up_shared, up_routed, hidden_shared, hidden_routed, x, x_ptrs,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, num_comm_sms, macrobatch_size, minibatch_size, swiglu_limit);
         case 32:
             return dispatch_mlp_swiglu_combiner<32, utils::RoutedPrecision::BF16>::dispatch_mlp_swiglu_combine_bwd_bf16(
                 d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
@@ -3244,7 +3341,7 @@ dispatch_mlp_swiglu_combine_bwd_bf16(
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 x_routed, gate_shared, gate_routed, up_shared, up_routed, hidden_shared, hidden_routed, x, x_ptrs,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, num_comm_sms, macrobatch_size, minibatch_size, swiglu_limit);
         case 64:
             return dispatch_mlp_swiglu_combiner<64, utils::RoutedPrecision::BF16>::dispatch_mlp_swiglu_combine_bwd_bf16(
                 d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
@@ -3252,7 +3349,7 @@ dispatch_mlp_swiglu_combine_bwd_bf16(
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 x_routed, gate_shared, gate_routed, up_shared, up_routed, hidden_shared, hidden_routed, x, x_ptrs,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, num_comm_sms, macrobatch_size, minibatch_size, swiglu_limit);
         default:
             throw std::runtime_error("MoK: dispatch_mlp_swiglu_combine_bwd_bf16 unsupported num_devices=" +
                                      std::to_string(num_devices) + " (supported: 4, 8, 16, 32, 64)");

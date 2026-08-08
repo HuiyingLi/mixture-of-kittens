@@ -1,3 +1,5 @@
+import math
+
 import torch
 
 from . import _C
@@ -384,6 +386,7 @@ def dispatch_mlp_swiglu_combine_fwd_bf16(
     num_comm_sms: int,
     macrobatch_size: int,
     minibatch_size: int,
+    swiglu_limit: float = 0.0,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -416,6 +419,9 @@ def dispatch_mlp_swiglu_combine_fwd_bf16(
         num_comm_sms:            int
         macrobatch_size:         int
         minibatch_size:          int
+        swiglu_limit:            float; zero selects ordinary SwiGLU, while a
+            positive value clamps the gate at its upper bound and the up
+            projection symmetrically before evaluating SwiGLU in FP32.
 
     Outputs:
         x_routed:      bfloat16 [macrobatch_size, hidden_size]
@@ -451,6 +457,8 @@ def dispatch_mlp_swiglu_combine_fwd_bf16(
         raise ValueError("minibatch_size must be positive and divisible by 256")
     if type(macrobatch_size) is not int or macrobatch_size <= 0 or macrobatch_size % minibatch_size != 0:
         raise ValueError("macrobatch_size must be a positive multiple of minibatch_size")
+    if type(swiglu_limit) not in (int, float) or not math.isfinite(swiglu_limit) or swiglu_limit < 0:
+        raise ValueError("swiglu_limit must be a non-negative finite number")
     for pointer_name, pointers in (("x_ptrs", x_ptrs), ("combine_buffer_ptrs", combine_buffer_ptrs)):
         if not isinstance(pointers, list) or any(
             type(pointer) is not int or pointer <= 0 for pointer in pointers
@@ -502,7 +510,7 @@ def dispatch_mlp_swiglu_combine_fwd_bf16(
         w_shared_gate, w_routed_gate, w_shared_up, w_routed_up,
         w_shared_down, w_routed_down,
         schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-        topk, num_comm_sms, macrobatch_size, minibatch_size,
+        topk, num_comm_sms, macrobatch_size, minibatch_size, swiglu_limit,
     )
 
 
@@ -832,6 +840,7 @@ def dispatch_mlp_swiglu_combine_bwd_bf16(
     num_comm_sms: int,
     macrobatch_size: int,
     minibatch_size: int,
+    swiglu_limit: float = 0.0,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -883,6 +892,9 @@ def dispatch_mlp_swiglu_combine_bwd_bf16(
         num_comm_sms:                  int
         macrobatch_size:               int
         minibatch_size:                int
+        swiglu_limit:                  float; zero selects ordinary SwiGLU,
+            while a positive value applies the same FP32 clamps used by the
+            corresponding forward pass.
 
     Outputs:
         d_x_shared:      bfloat16 [num_local_tokens, hidden_size]
@@ -924,6 +936,8 @@ def dispatch_mlp_swiglu_combine_bwd_bf16(
         raise ValueError("minibatch_size must be positive and divisible by 256")
     if type(macrobatch_size) is not int or macrobatch_size <= 0 or macrobatch_size % minibatch_size != 0:
         raise ValueError("macrobatch_size must be a positive multiple of minibatch_size")
+    if type(swiglu_limit) not in (int, float) or not math.isfinite(swiglu_limit) or swiglu_limit < 0:
+        raise ValueError("swiglu_limit must be a non-negative finite number")
     pointer_lists = (
         ("d_y_buffer_ptrs", d_y_buffer_ptrs),
         ("d_x_routed_buffer_ptrs", d_x_routed_buffer_ptrs),
@@ -988,7 +1002,7 @@ def dispatch_mlp_swiglu_combine_bwd_bf16(
         hidden_shared, hidden_routed,
         x, x_ptrs,
         schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-        topk, num_comm_sms, macrobatch_size, minibatch_size,
+        topk, num_comm_sms, macrobatch_size, minibatch_size, swiglu_limit,
     )
 
 
