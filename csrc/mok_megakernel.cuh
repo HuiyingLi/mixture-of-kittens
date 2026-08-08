@@ -609,7 +609,35 @@ static __device__ __forceinline__ void combine_kernel(
     }
 }
 
-template <bool IS_SHARED>
+template <bool CLAMPED>
+static __device__ __forceinline__ float swiglu_gate_value(float value, float limit) {
+    if constexpr (CLAMPED)
+        return fminf(value, limit);
+    return value;
+}
+
+template <bool CLAMPED>
+static __device__ __forceinline__ float swiglu_up_value(float value, float limit) {
+    if constexpr (CLAMPED)
+        return fminf(fmaxf(value, -limit), limit);
+    return value;
+}
+
+template <bool CLAMPED>
+static __device__ __forceinline__ float swiglu_gate_grad(float value, float limit) {
+    if constexpr (CLAMPED)
+        return value <= limit ? 1.0f : 0.0f;
+    return 1.0f;
+}
+
+template <bool CLAMPED>
+static __device__ __forceinline__ float swiglu_up_grad(float value, float limit) {
+    if constexpr (CLAMPED)
+        return value >= -limit && value <= limit ? 1.0f : 0.0f;
+    return 1.0f;
+}
+
+template <bool IS_SHARED, bool CLAMPED>
 static __device__ __forceinline__ void swiglu_fwd_kernel(
     const epi_bf16_gl &gate_gmem,
     const epi_bf16_gl &up_gmem,
@@ -703,7 +731,7 @@ static __device__ __forceinline__ void swiglu_fwd_kernel(
             }
 
             if constexpr (!USE_ROUTED_MXFP8) {
-                if (swiglu_limit > 0.0f) {
+                if constexpr (CLAMPED) {
                     if (threadIdx.x == 0) tma::store_async_read_wait();
                     __syncthreads();
                     const auto *gate_pairs = reinterpret_cast<const bf16_2 *>(gate_smem[stage].data);
@@ -794,7 +822,7 @@ static __device__ __forceinline__ void swiglu_fwd_kernel(
     }
 }
 
-template <bool IS_SHARED>
+template <bool IS_SHARED, bool CLAMPED>
 static __device__ __forceinline__ void swiglu_bwd_kernel(
     const epi_bf16_gl &d_hidden_gmem,
     const std::conditional_t<IS_SHARED, swiglu_bf16_gl, routed_gate_up_gl> &gate_gmem,
@@ -1044,7 +1072,7 @@ static __device__ __forceinline__ void swiglu_bwd_kernel(
                 }
                 __syncthreads();
             } else if constexpr (IS_SHARED) {
-                if (swiglu_limit > 0.0f) {
+                if constexpr (CLAMPED) {
                     const auto *gate_pairs = reinterpret_cast<const bf16_2 *>(gate_smem[stage].data);
                     const auto *up_pairs = reinterpret_cast<const bf16_2 *>(up_smem[stage].data);
                     const auto *d_hidden_pairs = reinterpret_cast<const bf16_2 *>(d_hidden_smem[stage].data);
@@ -1131,15 +1159,14 @@ static __device__ __forceinline__ void swiglu_bwd_kernel(
                         const float2 raw_gate = __bfloat1622float2(gate_pairs[j]);
                         const float2 raw_up = __bfloat1622float2(up_pairs[j]);
                         const float2 d_hidden = __bfloat1622float2(d_hidden_pairs[j]);
-                        const float2 gate = swiglu_limit > 0.0f
-                            ? float2{fminf(raw_gate.x, swiglu_limit), fminf(raw_gate.y, swiglu_limit)}
-                            : raw_gate;
-                        const float2 up = swiglu_limit > 0.0f
-                            ? float2{
-                                fminf(fmaxf(raw_up.x, -swiglu_limit), swiglu_limit),
-                                fminf(fmaxf(raw_up.y, -swiglu_limit), swiglu_limit)
-                            }
-                            : raw_up;
+                        const float2 gate = {
+                            swiglu_gate_value<CLAMPED>(raw_gate.x, swiglu_limit),
+                            swiglu_gate_value<CLAMPED>(raw_gate.y, swiglu_limit),
+                        };
+                        const float2 up = {
+                            swiglu_up_value<CLAMPED>(raw_up.x, swiglu_limit),
+                            swiglu_up_value<CLAMPED>(raw_up.y, swiglu_limit),
+                        };
                         const float sigmoid_x = 1.0f / (1.0f + __expf(-gate.x));
                         const float sigmoid_y = 1.0f / (1.0f + __expf(-gate.y));
                         const float silu_x = gate.x * sigmoid_x;
@@ -1148,12 +1175,10 @@ static __device__ __forceinline__ void swiglu_bwd_kernel(
                         const float dsilu_y = (1.0f - silu_y) * sigmoid_y + silu_y;
                         router_grad_partial += d_hidden.x * inv_router_weight * silu_x * up.x
                                              + d_hidden.y * inv_router_weight * silu_y * up.y;
-                        const float gate_grad_x = swiglu_limit == 0.0f || raw_gate.x <= swiglu_limit ? 1.0f : 0.0f;
-                        const float gate_grad_y = swiglu_limit == 0.0f || raw_gate.y <= swiglu_limit ? 1.0f : 0.0f;
-                        const float up_grad_x = swiglu_limit == 0.0f
-                            || (raw_up.x >= -swiglu_limit && raw_up.x <= swiglu_limit) ? 1.0f : 0.0f;
-                        const float up_grad_y = swiglu_limit == 0.0f
-                            || (raw_up.y >= -swiglu_limit && raw_up.y <= swiglu_limit) ? 1.0f : 0.0f;
+                        const float gate_grad_x = swiglu_gate_grad<CLAMPED>(raw_gate.x, swiglu_limit);
+                        const float gate_grad_y = swiglu_gate_grad<CLAMPED>(raw_gate.y, swiglu_limit);
+                        const float up_grad_x = swiglu_up_grad<CLAMPED>(raw_up.x, swiglu_limit);
+                        const float up_grad_y = swiglu_up_grad<CLAMPED>(raw_up.y, swiglu_limit);
                         d_gate_pairs[j] = __floats2bfloat162_rn(
                             gate_grad_x * dsilu_x * up.x * d_hidden.x,
                             gate_grad_y * dsilu_y * up.y * d_hidden.y
@@ -1587,6 +1612,7 @@ static __device__ __forceinline__ void expert_grouped_gemm_kernel(
     }
 }
 
+template <bool CLAMPED>
 static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_fwd_kernel(const globals_fwd &g) {
     int cluster_idx = clusterIdx().x;
     const int cta_rank = cluster_ctarank();
@@ -1767,7 +1793,7 @@ static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_fwd_kernel(co
         } else if (compute_cluster_idx < shared_gate_up_tasks * 2 + shared_swiglu_tasks) {
             // Shared Swiglu (BF16)
             const int task_idx = compute_cluster_idx - shared_gate_up_tasks * 2;
-            swiglu_fwd_kernel<true>(g.gate_shared, g.up_shared, g.hidden_shared, nullptr, nullptr, nullptr,
+            swiglu_fwd_kernel<true, CLAMPED>(g.gate_shared, g.up_shared, g.hidden_shared, nullptr, nullptr, nullptr,
                              g.gate_up_tile_ready, g.hidden_row_block_ready,
                              swiglu_inputs_arrived, swiglu_bitfield,
                              g.x_shared.rows(), macrobatch_size, g.minibatch_size, g.swiglu_limit,
@@ -1819,7 +1845,7 @@ static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_fwd_kernel(co
             } else if (minibatch_task_idx < minibatch_routed_gate_up_tasks * 2 + minibatch_routed_swiglu_tasks) {
                 // Routed Swiglu
                 const int task_idx = minibatch_task_idx - minibatch_routed_gate_up_tasks * 2;
-                swiglu_fwd_kernel<false>(g.gate_routed, g.up_routed, g.hidden_fp8_routed,
+                swiglu_fwd_kernel<false, CLAMPED>(g.gate_routed, g.up_routed, g.hidden_fp8_routed,
                                   &g.hidden_sc_routed, &g.hidden_fp8_t_routed, &g.hidden_sc_t_routed,
                                   g.gate_up_tile_ready, g.hidden_row_block_ready,
                                   swiglu_inputs_arrived, swiglu_bitfield,
@@ -2002,7 +2028,7 @@ dispatch_mlp_swiglu_combine_fwd_mxfp8(
         .swiglu_limit = 0.0f
     };
 
-    kittens::py::launch_kernel<config, globals_fwd, dispatch_mlp_swiglu_combine_fwd_kernel>(g);
+    kittens::py::launch_kernel<config, globals_fwd, dispatch_mlp_swiglu_combine_fwd_kernel<false>>(g);
 
     return {x_fp8_t_routed, x_sc_t_routed,
             gate_shared, gate_fp8_routed, gate_sc_routed,
@@ -2116,10 +2142,14 @@ dispatch_mlp_swiglu_combine_fwd_bf16(
         .swiglu_limit = swiglu_limit
     };
 
-    kittens::py::launch_kernel<config, globals_fwd, dispatch_mlp_swiglu_combine_fwd_kernel>(g);
+    if (swiglu_limit > 0.0f)
+        kittens::py::launch_kernel<config, globals_fwd, dispatch_mlp_swiglu_combine_fwd_kernel<true>>(g);
+    else
+        kittens::py::launch_kernel<config, globals_fwd, dispatch_mlp_swiglu_combine_fwd_kernel<false>>(g);
     return {x_routed, gate_shared, gate_routed, up_shared, up_routed, hidden_shared, hidden_routed, y_shared, y_routed};
 }
 
+template <bool CLAMPED>
 static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_bwd_kernel(const globals_bwd &g) {
     const int num_local_experts = g.w_routed_gate.depth();
     const int intermediate_dim_col_blocks = g.hidden_shared.cols() / config::MLP_Nb;
@@ -2356,7 +2386,7 @@ static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_bwd_kernel(co
         } else if (compute_cluster_idx < shared_dgrad_down_tasks + shared_swiglu_bwd_tasks) {
             // Shared Swiglu bwd: d_gate_shared, d_up_shared = swiglu_bwd(d_hidden_shared, gate_shared, up_shared)
             const int task_idx = compute_cluster_idx - shared_dgrad_down_tasks;
-            swiglu_bwd_kernel<true>(g.d_hidden_shared, g.gate_shared, g.up_shared, g.d_gate_shared, g.d_up_shared,
+            swiglu_bwd_kernel<true, CLAMPED>(g.d_hidden_shared, g.gate_shared, g.up_shared, g.d_gate_shared, g.d_up_shared,
                              nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                              nullptr, nullptr, nullptr,
                              g.d_hidden_ready, nullptr, g.d_gate_up_ready, nullptr,
@@ -2440,7 +2470,7 @@ static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_bwd_kernel(co
                 } else {
                     // Replay Swiglu refreshes the routed hidden activation.
                     const int task_idx = minibatch_task_idx - minibatch_routed_gate_up_tasks * 2;
-                    swiglu_fwd_kernel<false>(g.gate_routed, g.up_routed, g.hidden_fp8_routed,
+                    swiglu_fwd_kernel<false, CLAMPED>(g.gate_routed, g.up_routed, g.hidden_fp8_routed,
                                       &g.hidden_sc_routed, &g.hidden_fp8_t_routed, &g.hidden_sc_t_routed,
                                       g.replayed_gate_up_ready, g.replayed_hidden_ready,
                                       swiglu_fwd_inputs_arrived, swiglu_fwd_bitfield,
@@ -2467,7 +2497,7 @@ static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_bwd_kernel(co
                            minibatch_task_idx < minibatch_routed_dgrad_down_tasks + minibatch_routed_swiglu_bwd_tasks) {
                     // Routed Swiglu backward
                     const int task_idx = minibatch_task_idx - minibatch_routed_dgrad_down_tasks;
-                    swiglu_bwd_kernel<false>(g.d_hidden_routed, g.gate_fp8_routed, g.up_fp8_routed, g.d_gate_fp8_routed, g.d_up_fp8_routed,
+                    swiglu_bwd_kernel<false, CLAMPED>(g.d_hidden_routed, g.gate_fp8_routed, g.up_fp8_routed, g.d_gate_fp8_routed, g.d_up_fp8_routed,
                                       &g.gate_sc_routed, &g.up_sc_routed, &g.d_gate_sc_routed, &g.d_up_sc_routed,
                                       &g.d_gate_fp8_t_routed, &g.d_gate_sc_t_routed, &g.d_up_fp8_t_routed, &g.d_up_sc_t_routed,
                                       &g.router_weights, &g.d_router_weight_partials, &g.schedule_peer_rank,
@@ -2776,7 +2806,7 @@ dispatch_mlp_swiglu_combine_bwd_mxfp8(
         .swiglu_limit = 0.0f
     };
 
-    kittens::py::launch_kernel<config, globals_bwd, dispatch_mlp_swiglu_combine_bwd_kernel>(g);
+    kittens::py::launch_kernel<config, globals_bwd, dispatch_mlp_swiglu_combine_bwd_kernel<false>>(g);
     const int64_t elements_per_expert = d_w_routed_gate.numel() / num_local_experts;
     utils::zero_empty_routed_wgrads<<<dim3(128, num_local_experts), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
         reinterpret_cast<uint16_t *>(d_w_routed_gate.data_ptr<at::BFloat16>()),
@@ -2966,7 +2996,10 @@ dispatch_mlp_swiglu_combine_bwd_bf16(
         .swiglu_limit = swiglu_limit
     };
 
-    kittens::py::launch_kernel<config, globals_bwd, dispatch_mlp_swiglu_combine_bwd_kernel>(g);
+    if (swiglu_limit > 0.0f)
+        kittens::py::launch_kernel<config, globals_bwd, dispatch_mlp_swiglu_combine_bwd_kernel<true>>(g);
+    else
+        kittens::py::launch_kernel<config, globals_bwd, dispatch_mlp_swiglu_combine_bwd_kernel<false>>(g);
     const int64_t elements_per_expert = d_w_routed_gate.numel() / num_local_experts;
     utils::zero_empty_routed_wgrads<<<dim3(128, num_local_experts), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
         reinterpret_cast<uint16_t *>(d_w_routed_gate.data_ptr<at::BFloat16>()),
