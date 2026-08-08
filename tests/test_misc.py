@@ -818,6 +818,7 @@ def test_fake_tensor_metadata(
         mxfp8_backward = ops.dispatch_mlp_swiglu_combine_bwd_mxfp8(
             workspace.d_y_buffer,
             pointers,
+            workspace.d_y_buffer,
             workspace.d_x_routed_buffer,
             pointers,
             workspace.router_weight_buffer,
@@ -945,6 +946,7 @@ def test_fake_tensor_metadata(
         bf16_backward = ops.dispatch_mlp_swiglu_combine_bwd_bf16(
             workspace.d_y_buffer,
             pointers,
+            workspace.d_y_buffer,
             workspace.d_x_routed_buffer,
             pointers,
             workspace.router_weight_buffer,

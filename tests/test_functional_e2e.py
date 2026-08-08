@@ -123,6 +123,110 @@ def test_e2e_bf16(context: tuple[int, int, torch.device]) -> None:
             )
 
 
+def test_e2e_bf16_shared_output_gate(context: tuple[int, int, torch.device]) -> None:
+    rank, world_size, device = context
+    num_experts = world_size
+    num_local_experts = 1
+    hidden_dim = 256
+    intermediate_dim = 256
+    topk = 1
+    num_local_tokens = 512
+    inputs = generate_inputs(
+        rank,
+        device,
+        num_experts,
+        num_local_experts,
+        topk,
+        num_local_tokens,
+        hidden_dim,
+        intermediate_dim,
+    )
+    (
+        x,
+        topk_experts,
+        router_weights,
+        w_shared_gate,
+        w_shared_up,
+        w_shared_down,
+        w_routed_gate,
+        w_routed_up,
+        w_routed_down,
+        d_output,
+    ) = inputs
+    generator = torch.Generator(device=device).manual_seed(4321 + rank)
+    shared_output_gate = torch.sigmoid(
+        torch.randn((num_local_tokens, 1), device=device, dtype=torch.bfloat16, generator=generator)
+    )
+    reference_results = run_reference_bf16(*inputs, shared_output_gate=shared_output_gate)
+    config = functional.MoKConfig(
+        fwd_num_comm_sms=2,
+        bwd_num_comm_sms=2,
+        minibatch_size=256,
+        macrobatch_size=256,
+        schedule_capacity_multiplier=1.5,
+        all_gather_top_experts_chunk_bytes=16,
+    )
+    workspace = get_workspace(
+        config,
+        dist.group.WORLD,
+        device=device,
+        num_local_tokens=num_local_tokens,
+        hidden_size=hidden_dim,
+        topk=topk,
+    )
+    schedule = functional.build_schedule(
+        workspace,
+        config,
+        topk_experts,
+        num_local_experts=num_local_experts,
+    )
+
+    output, _, forward_context = functional.forward_with_shared_output(
+        config,
+        workspace,
+        schedule,
+        x,
+        router_weights,
+        w_shared_gate,
+        w_shared_up,
+        w_shared_down,
+        w_routed_gate,
+        w_routed_up,
+        w_routed_down,
+        shared_output_gate,
+    )
+    gradients = functional.backward(
+        config,
+        workspace,
+        schedule,
+        forward_context,
+        d_output,
+        x,
+        router_weights,
+        w_shared_gate,
+        w_shared_up,
+        w_shared_down,
+        w_routed_gate,
+        w_routed_up,
+        w_routed_down,
+        shared_grad_output=d_output * shared_output_gate,
+    )
+
+    for name, reference, actual in zip(
+        RESULT_NAMES,
+        reference_results,
+        (output, *gradients),
+        strict=True,
+    ):
+        check_correctness(
+            f"shared output gate/{name}",
+            reference,
+            actual,
+            BF16_TOLERANCE,
+            print_stats=rank == 0,
+        )
+
+
 def test_e2e_mxfp8(context: tuple[int, int, torch.device]) -> None:
     rank, world_size, device = context
     for shape, params in itertools.product(shapes(world_size), mok_params()):

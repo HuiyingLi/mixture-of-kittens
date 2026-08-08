@@ -27,6 +27,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           pybind11::arg("macrobatch_size"), pybind11::arg("minibatch_size"));
     m.def("dispatch_mlp_swiglu_combine_bwd_mxfp8", &dispatch_mlp_swiglu_combine_bwd_mxfp8, "",
           pybind11::arg("d_y_buffer"), pybind11::arg("d_y_buffer_ptrs"),
+          pybind11::arg("d_y_shared"),
           pybind11::arg("d_x_routed_buffer"), pybind11::arg("d_x_routed_buffer_ptrs"),
           pybind11::arg("router_weight_buffer"), pybind11::arg("router_weight_buffer_ptrs"),
           pybind11::arg("d_router_weight_buffer"), pybind11::arg("d_router_weight_buffer_ptrs"),
@@ -56,6 +57,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           pybind11::arg("macrobatch_size"), pybind11::arg("minibatch_size"));
     m.def("dispatch_mlp_swiglu_combine_bwd_bf16", &dispatch_mlp_swiglu_combine_bwd_bf16, "",
           pybind11::arg("d_y_buffer"), pybind11::arg("d_y_buffer_ptrs"),
+          pybind11::arg("d_y_shared"),
           pybind11::arg("d_x_routed_buffer"), pybind11::arg("d_x_routed_buffer_ptrs"),
           pybind11::arg("router_weight_buffer"), pybind11::arg("router_weight_buffer_ptrs"),
           pybind11::arg("d_router_weight_buffer"), pybind11::arg("d_router_weight_buffer_ptrs"),

@@ -966,6 +966,7 @@ def test_dispatch_mlp_swiglu_combine_bwd_mxfp8(
         outputs = dispatch_mlp_swiglu_combine_bwd_mxfp8(
             workspace.d_y_buffer,
             workspace.d_y_buffer_ptrs,
+            workspace.d_y_buffer,
             workspace.d_x_routed_buffer,
             workspace.d_x_routed_buffer_ptrs,
             workspace.router_weight_buffer,
@@ -1156,6 +1157,7 @@ def test_dispatch_mlp_swiglu_combine_bwd_mxfp8(
     valid_kwargs = {
         "d_y_buffer": workspace.d_y_buffer,
         "d_y_buffer_ptrs": workspace.d_y_buffer_ptrs,
+        "d_y_shared": workspace.d_y_buffer,
         "d_x_routed_buffer": workspace.d_x_routed_buffer,
         "d_x_routed_buffer_ptrs": workspace.d_x_routed_buffer_ptrs,
         "router_weight_buffer": workspace.router_weight_buffer,
@@ -1351,6 +1353,7 @@ def test_dispatch_mlp_swiglu_combine_bwd_bf16(
         outputs = dispatch_mlp_swiglu_combine_bwd_bf16(
             workspace.d_y_buffer,
             workspace.d_y_buffer_ptrs,
+            workspace.d_y_buffer,
             workspace.d_x_routed_buffer,
             workspace.d_x_routed_buffer_ptrs,
             workspace.router_weight_buffer,
@@ -1505,6 +1508,7 @@ def test_dispatch_mlp_swiglu_combine_bwd_bf16(
     valid_kwargs = {
         "d_y_buffer": workspace.d_y_buffer,
         "d_y_buffer_ptrs": workspace.d_y_buffer_ptrs,
+        "d_y_shared": workspace.d_y_buffer,
         "d_x_routed_buffer": workspace.d_x_routed_buffer,
         "d_x_routed_buffer_ptrs": workspace.d_x_routed_buffer_ptrs,
         "router_weight_buffer": workspace.router_weight_buffer,

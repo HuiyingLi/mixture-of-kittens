@@ -306,6 +306,7 @@ def run_reference_bf16(
     w_routed_up: torch.Tensor,     # [E, I, H]
     w_routed_down: torch.Tensor,   # [E, H, I]
     d_output: torch.Tensor,        # [T, H]
+    shared_output_gate: torch.Tensor | None = None,  # [T, 1]
 ) -> tuple[
     torch.Tensor,  # output
     torch.Tensor,  # d_x
@@ -369,7 +370,13 @@ def run_reference_bf16(
     shared_output = (torch.nn.functional.silu(gate_shared) * up_shared) @ w_shared_down.T
 
     # Final sum
-    output = (routed_output + shared_output.float()).to(torch.bfloat16)
+    if shared_output_gate is None:
+        gated_shared_output = shared_output
+        d_shared_output = d_output
+    else:
+        gated_shared_output = shared_output * shared_output_gate
+        d_shared_output = d_output * shared_output_gate
+    output = (routed_output + gated_shared_output.float()).to(torch.bfloat16)
 
     # Combine all-to-all
     d_flat_output = (d_output.unsqueeze(1).float() * router_weights.unsqueeze(2)).to(torch.bfloat16)
@@ -389,7 +396,7 @@ def run_reference_bf16(
     d_x_shared, d_w_shared_gate, d_w_shared_up, d_w_shared_down = torch.autograd.grad(
         shared_output,
         (x_shared, w_shared_gate, w_shared_up, w_shared_down),
-        d_output,
+        d_shared_output,
     )
     d_x = (d_x_routed + d_x_shared.float()).to(torch.bfloat16)
     d_router_weights = (d_output.unsqueeze(1).float() * flat_output.view(num_local_tokens, topk, hidden).float()).sum(2)

@@ -516,6 +516,7 @@ def dispatch_mlp_swiglu_combine_fwd_bf16(
 def dispatch_mlp_swiglu_combine_bwd_mxfp8(
     d_y_buffer: torch.Tensor,
     d_y_buffer_ptrs: list[int],
+    d_y_shared: torch.Tensor,
     d_x_routed_buffer: torch.Tensor,
     d_x_routed_buffer_ptrs: list[int],
     router_weight_buffer: torch.Tensor,
@@ -581,6 +582,7 @@ def dispatch_mlp_swiglu_combine_bwd_mxfp8(
     Inputs:
         d_y_buffer:                    bfloat16 [num_local_tokens, hidden_size]
         d_y_buffer_ptrs:               list[int] [ep_size]
+        d_y_shared:                    bfloat16 [num_local_tokens, hidden_size]
         d_x_routed_buffer:             bfloat16 [num_local_tokens * topk, hidden_size]
         d_x_routed_buffer_ptrs:        list[int] [ep_size]
         router_weight_buffer:          float32 [num_local_tokens, topk]
@@ -697,6 +699,7 @@ def dispatch_mlp_swiglu_combine_bwd_mxfp8(
     e_h_i_sc = (num_local_experts * hidden_size // 128, intermediate_size // 128, 32, 16)
     expected_shapes = (
         ("d_y_buffer", d_y_buffer, (num_local_tokens, hidden_size)),
+        ("d_y_shared", d_y_shared, (num_local_tokens, hidden_size)),
         ("d_x_routed_buffer", d_x_routed_buffer, (num_local_tokens * topk, hidden_size)),
         ("router_weight_buffer", router_weight_buffer, (num_local_tokens, topk)),
         ("d_router_weight_buffer", d_router_weight_buffer, (num_local_tokens, topk)),
@@ -733,6 +736,7 @@ def dispatch_mlp_swiglu_combine_bwd_mxfp8(
             raise ValueError(f"{tensor_name} must have shape {expected_shape}")
     for tensor_name, tensor in (
         ("d_y_buffer", d_y_buffer),
+        ("d_y_shared", d_y_shared),
         ("d_x_routed_buffer", d_x_routed_buffer),
         ("router_weight_buffer", router_weight_buffer),
         ("d_router_weight_buffer", d_router_weight_buffer),
@@ -780,7 +784,7 @@ def dispatch_mlp_swiglu_combine_bwd_mxfp8(
         raise ValueError("tokens_per_expert must have shape (num_local_experts,)")
 
     return _C.dispatch_mlp_swiglu_combine_bwd_mxfp8(
-        d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
+        d_y_buffer, d_y_buffer_ptrs, d_y_shared, d_x_routed_buffer, d_x_routed_buffer_ptrs,
         router_weight_buffer, router_weight_buffer_ptrs,
         d_router_weight_buffer, d_router_weight_buffer_ptrs,
         w_shared_gate, w_routed_gate_T, w_routed_gate_T_sc,
@@ -803,6 +807,7 @@ def dispatch_mlp_swiglu_combine_bwd_mxfp8(
 def dispatch_mlp_swiglu_combine_bwd_bf16(
     d_y_buffer: torch.Tensor,
     d_y_buffer_ptrs: list[int],
+    d_y_shared: torch.Tensor,
     d_x_routed_buffer: torch.Tensor,
     d_x_routed_buffer_ptrs: list[int],
     router_weight_buffer: torch.Tensor,
@@ -854,6 +859,7 @@ def dispatch_mlp_swiglu_combine_bwd_bf16(
     Inputs:
         d_y_buffer:                    bfloat16 [num_local_tokens, hidden_size]
         d_y_buffer_ptrs:               list[int] [ep_size]
+        d_y_shared:                    bfloat16 [num_local_tokens, hidden_size]
         d_x_routed_buffer:             bfloat16 [num_local_tokens * topk, hidden_size]
         d_x_routed_buffer_ptrs:        list[int] [ep_size]
         router_weight_buffer:          float32 [num_local_tokens, topk]
@@ -949,6 +955,7 @@ def dispatch_mlp_swiglu_combine_bwd_bf16(
         raise ValueError("schedule_capacity must be divisible by 256")
     expected_shapes = (
         ("d_y_buffer", d_y_buffer, (num_local_tokens, hidden_size)),
+        ("d_y_shared", d_y_shared, (num_local_tokens, hidden_size)),
         ("d_x_routed_buffer", d_x_routed_buffer, (num_local_tokens * topk, hidden_size)),
         ("router_weight_buffer", router_weight_buffer, (num_local_tokens, topk)),
         ("d_router_weight_buffer", d_router_weight_buffer, (num_local_tokens, topk)),
@@ -979,7 +986,7 @@ def dispatch_mlp_swiglu_combine_bwd_bf16(
         raise ValueError(f"schedule_peer_rank must be on {x.device}")
 
     return _C.dispatch_mlp_swiglu_combine_bwd_bf16(
-        d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
+        d_y_buffer, d_y_buffer_ptrs, d_y_shared, d_x_routed_buffer, d_x_routed_buffer_ptrs,
         router_weight_buffer, router_weight_buffer_ptrs,
         d_router_weight_buffer, d_router_weight_buffer_ptrs,
         w_shared_gate, w_routed_gate, w_shared_up, w_routed_up,

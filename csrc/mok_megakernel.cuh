@@ -2478,6 +2478,7 @@ dispatch_mlp_swiglu_combine_bwd_mxfp8(
     // Symmetric buffers (input/output gradients and router weights)
     const at::Tensor &d_y_buffer,               // (num_local_tokens, H)
     const std::vector<int64_t> &d_y_buffer_ptrs,
+    const at::Tensor &d_y_shared,               // (num_local_tokens, H)
     const at::Tensor &d_x_routed_buffer,        // (num_local_tokens * topk, H)
     const std::vector<int64_t> &d_x_routed_buffer_ptrs,
     const at::Tensor &router_weight_buffer,     // (num_local_tokens, topk)
@@ -2619,7 +2620,7 @@ dispatch_mlp_swiglu_combine_bwd_mxfp8(
         .hidden_sc_routed = kittens::py::tensor_to_gl<sc_gl>(hidden_sc_routed),
         .hidden_fp8_t_routed = kittens::py::tensor_to_gl<mlp_fp8_gl>(hidden_fp8_t_routed),
         .hidden_sc_t_routed = kittens::py::tensor_to_gl<sc_gl>(hidden_sc_t_routed),
-        .d_y_shared = kittens::py::tensor_to_gl<mlp_bf16_gl>(d_y_buffer),
+        .d_y_shared = kittens::py::tensor_to_gl<mlp_bf16_gl>(d_y_shared),
         .d_y_fp8_routed = kittens::py::tensor_to_gl<mlp_fp8_gl>(d_y_fp8_routed),
         .d_y_sc_routed = kittens::py::tensor_to_gl<sc_gl>(d_y_sc_routed),
         .d_y_fp8_t_routed = kittens::py::tensor_to_gl<mlp_fp8_gl>(d_y_fp8_t_routed),
@@ -2705,6 +2706,7 @@ static __host__ __forceinline__ std::tuple<at::Tensor, at::Tensor, at::Tensor, a
 dispatch_mlp_swiglu_combine_bwd_bf16(
     const at::Tensor &d_y_buffer,
     const std::vector<int64_t> &d_y_buffer_ptrs,
+    const at::Tensor &d_y_shared,
     const at::Tensor &d_x_routed_buffer,
     const std::vector<int64_t> &d_x_routed_buffer_ptrs,
     const at::Tensor &router_weight_buffer,
@@ -2807,7 +2809,7 @@ dispatch_mlp_swiglu_combine_bwd_bf16(
         .hidden_sc_routed = {},
         .hidden_fp8_t_routed = kittens::py::tensor_to_gl<routed_transposed_gl>(hidden_routed),
         .hidden_sc_t_routed = {},
-        .d_y_shared = kittens::py::tensor_to_gl<mlp_bf16_gl>(d_y_buffer),
+        .d_y_shared = kittens::py::tensor_to_gl<mlp_bf16_gl>(d_y_shared),
         .d_y_fp8_routed = kittens::py::tensor_to_gl<routed_activation_gl>(d_y_routed),
         .d_y_sc_routed = {},
         .d_y_fp8_t_routed = kittens::py::tensor_to_gl<routed_transposed_gl>(d_y_routed),
@@ -3035,6 +3037,7 @@ dispatch_mlp_swiglu_combine_bwd_mxfp8(
     // Symmetric buffers (input/output gradients and router weights)
     const at::Tensor &d_y_buffer,
     const std::vector<int64_t> &d_y_buffer_ptrs,
+    const at::Tensor &d_y_shared,
     const at::Tensor &d_x_routed_buffer,
     const std::vector<int64_t> &d_x_routed_buffer_ptrs,
     const at::Tensor &router_weight_buffer,
@@ -3091,7 +3094,7 @@ dispatch_mlp_swiglu_combine_bwd_mxfp8(
     switch (num_devices) {
         case 4:
             return dispatch_mlp_swiglu_combiner<4>::dispatch_mlp_swiglu_combine_bwd_mxfp8(
-                d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
+                d_y_buffer, d_y_buffer_ptrs, d_y_shared, d_x_routed_buffer, d_x_routed_buffer_ptrs,
                 router_weight_buffer, router_weight_buffer_ptrs, d_router_weight_buffer, d_router_weight_buffer_ptrs,
                 w_shared_gate, w_routed_gate_T, w_routed_gate_T_sc,
                 w_shared_up, w_routed_up_T, w_routed_up_T_sc,
@@ -3107,7 +3110,7 @@ dispatch_mlp_swiglu_combine_bwd_mxfp8(
                 topk, num_comm_sms, macrobatch_size, minibatch_size);
         case 8:
             return dispatch_mlp_swiglu_combiner<8>::dispatch_mlp_swiglu_combine_bwd_mxfp8(
-                d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
+                d_y_buffer, d_y_buffer_ptrs, d_y_shared, d_x_routed_buffer, d_x_routed_buffer_ptrs,
                 router_weight_buffer, router_weight_buffer_ptrs, d_router_weight_buffer, d_router_weight_buffer_ptrs,
                 w_shared_gate, w_routed_gate_T, w_routed_gate_T_sc,
                 w_shared_up, w_routed_up_T, w_routed_up_T_sc,
@@ -3123,7 +3126,7 @@ dispatch_mlp_swiglu_combine_bwd_mxfp8(
                 topk, num_comm_sms, macrobatch_size, minibatch_size);
         case 16:
             return dispatch_mlp_swiglu_combiner<16>::dispatch_mlp_swiglu_combine_bwd_mxfp8(
-                d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
+                d_y_buffer, d_y_buffer_ptrs, d_y_shared, d_x_routed_buffer, d_x_routed_buffer_ptrs,
                 router_weight_buffer, router_weight_buffer_ptrs, d_router_weight_buffer, d_router_weight_buffer_ptrs,
                 w_shared_gate, w_routed_gate_T, w_routed_gate_T_sc,
                 w_shared_up, w_routed_up_T, w_routed_up_T_sc,
@@ -3139,7 +3142,7 @@ dispatch_mlp_swiglu_combine_bwd_mxfp8(
                 topk, num_comm_sms, macrobatch_size, minibatch_size);
         case 32:
             return dispatch_mlp_swiglu_combiner<32>::dispatch_mlp_swiglu_combine_bwd_mxfp8(
-                d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
+                d_y_buffer, d_y_buffer_ptrs, d_y_shared, d_x_routed_buffer, d_x_routed_buffer_ptrs,
                 router_weight_buffer, router_weight_buffer_ptrs, d_router_weight_buffer, d_router_weight_buffer_ptrs,
                 w_shared_gate, w_routed_gate_T, w_routed_gate_T_sc,
                 w_shared_up, w_routed_up_T, w_routed_up_T_sc,
@@ -3155,7 +3158,7 @@ dispatch_mlp_swiglu_combine_bwd_mxfp8(
                 topk, num_comm_sms, macrobatch_size, minibatch_size);
         case 64:
             return dispatch_mlp_swiglu_combiner<64>::dispatch_mlp_swiglu_combine_bwd_mxfp8(
-                d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
+                d_y_buffer, d_y_buffer_ptrs, d_y_shared, d_x_routed_buffer, d_x_routed_buffer_ptrs,
                 router_weight_buffer, router_weight_buffer_ptrs, d_router_weight_buffer, d_router_weight_buffer_ptrs,
                 w_shared_gate, w_routed_gate_T, w_routed_gate_T_sc,
                 w_shared_up, w_routed_up_T, w_routed_up_T_sc,
@@ -3181,6 +3184,7 @@ static __host__ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::T
 dispatch_mlp_swiglu_combine_bwd_bf16(
     const at::Tensor &d_y_buffer,
     const std::vector<int64_t> &d_y_buffer_ptrs,
+    const at::Tensor &d_y_shared,
     const at::Tensor &d_x_routed_buffer,
     const std::vector<int64_t> &d_x_routed_buffer_ptrs,
     const at::Tensor &router_weight_buffer,
@@ -3215,7 +3219,7 @@ dispatch_mlp_swiglu_combine_bwd_bf16(
     switch (num_devices) {
         case 4:
             return dispatch_mlp_swiglu_combiner<4, utils::RoutedPrecision::BF16>::dispatch_mlp_swiglu_combine_bwd_bf16(
-                d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
+                d_y_buffer, d_y_buffer_ptrs, d_y_shared, d_x_routed_buffer, d_x_routed_buffer_ptrs,
                 router_weight_buffer, router_weight_buffer_ptrs, d_router_weight_buffer, d_router_weight_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 x_routed, gate_shared, gate_routed, up_shared, up_routed, hidden_shared, hidden_routed, x, x_ptrs,
@@ -3223,7 +3227,7 @@ dispatch_mlp_swiglu_combine_bwd_bf16(
                 topk, num_comm_sms, macrobatch_size, minibatch_size);
         case 8:
             return dispatch_mlp_swiglu_combiner<8, utils::RoutedPrecision::BF16>::dispatch_mlp_swiglu_combine_bwd_bf16(
-                d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
+                d_y_buffer, d_y_buffer_ptrs, d_y_shared, d_x_routed_buffer, d_x_routed_buffer_ptrs,
                 router_weight_buffer, router_weight_buffer_ptrs, d_router_weight_buffer, d_router_weight_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 x_routed, gate_shared, gate_routed, up_shared, up_routed, hidden_shared, hidden_routed, x, x_ptrs,
@@ -3231,7 +3235,7 @@ dispatch_mlp_swiglu_combine_bwd_bf16(
                 topk, num_comm_sms, macrobatch_size, minibatch_size);
         case 16:
             return dispatch_mlp_swiglu_combiner<16, utils::RoutedPrecision::BF16>::dispatch_mlp_swiglu_combine_bwd_bf16(
-                d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
+                d_y_buffer, d_y_buffer_ptrs, d_y_shared, d_x_routed_buffer, d_x_routed_buffer_ptrs,
                 router_weight_buffer, router_weight_buffer_ptrs, d_router_weight_buffer, d_router_weight_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 x_routed, gate_shared, gate_routed, up_shared, up_routed, hidden_shared, hidden_routed, x, x_ptrs,
@@ -3239,7 +3243,7 @@ dispatch_mlp_swiglu_combine_bwd_bf16(
                 topk, num_comm_sms, macrobatch_size, minibatch_size);
         case 32:
             return dispatch_mlp_swiglu_combiner<32, utils::RoutedPrecision::BF16>::dispatch_mlp_swiglu_combine_bwd_bf16(
-                d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
+                d_y_buffer, d_y_buffer_ptrs, d_y_shared, d_x_routed_buffer, d_x_routed_buffer_ptrs,
                 router_weight_buffer, router_weight_buffer_ptrs, d_router_weight_buffer, d_router_weight_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 x_routed, gate_shared, gate_routed, up_shared, up_routed, hidden_shared, hidden_routed, x, x_ptrs,
@@ -3247,7 +3251,7 @@ dispatch_mlp_swiglu_combine_bwd_bf16(
                 topk, num_comm_sms, macrobatch_size, minibatch_size);
         case 64:
             return dispatch_mlp_swiglu_combiner<64, utils::RoutedPrecision::BF16>::dispatch_mlp_swiglu_combine_bwd_bf16(
-                d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
+                d_y_buffer, d_y_buffer_ptrs, d_y_shared, d_x_routed_buffer, d_x_routed_buffer_ptrs,
                 router_weight_buffer, router_weight_buffer_ptrs, d_router_weight_buffer, d_router_weight_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 x_routed, gate_shared, gate_routed, up_shared, up_routed, hidden_shared, hidden_routed, x, x_ptrs,

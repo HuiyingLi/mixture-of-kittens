@@ -159,6 +159,7 @@ def _dispatch_mlp_swiglu_combine_fwd_bf16_fake(
 def _dispatch_mlp_swiglu_combine_bwd_mxfp8_fake(
     d_y_buffer: torch.Tensor,
     d_y_buffer_ptrs: list[int],
+    d_y_shared: torch.Tensor,
     d_x_routed_buffer: torch.Tensor,
     d_x_routed_buffer_ptrs: list[int],
     router_weight_buffer: torch.Tensor,
@@ -238,6 +239,7 @@ def _dispatch_mlp_swiglu_combine_bwd_mxfp8_fake(
 def _dispatch_mlp_swiglu_combine_bwd_bf16_fake(
     d_y_buffer: torch.Tensor,
     d_y_buffer_ptrs: list[int],
+    d_y_shared: torch.Tensor,
     d_x_routed_buffer: torch.Tensor,
     d_x_routed_buffer_ptrs: list[int],
     router_weight_buffer: torch.Tensor,
