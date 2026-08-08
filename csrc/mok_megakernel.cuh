@@ -731,40 +731,22 @@ static __device__ __forceinline__ void swiglu_fwd_kernel(
             }
 
             if constexpr (!USE_ROUTED_MXFP8) {
+                rt_fl<config::SWIGLU_Mb / config::NUM_WARPS, config::SWIGLU_Nb> gate, up, denominator;
+                compute_group::load(gate, gate_smem[stage]);
+                compute_group::load(up, up_smem[stage]);
                 if constexpr (CLAMPED) {
-                    if (threadIdx.x == 0) tma::store_async_read_wait();
-                    __syncthreads();
-                    const auto *gate_pairs = reinterpret_cast<const bf16_2 *>(gate_smem[stage].data);
-                    const auto *up_pairs = reinterpret_cast<const bf16_2 *>(up_smem[stage].data);
-                    auto *hidden_pairs = reinterpret_cast<bf16_2 *>(hidden_smem.data);
-                    #pragma unroll
-                    for (int i = threadIdx.x; i < config::SWIGLU_Mb * config::SWIGLU_Nb / 2; i += config::NUM_THREADS) {
-                        float2 gate = __bfloat1622float2(gate_pairs[i]);
-                        float2 up = __bfloat1622float2(up_pairs[i]);
-                        gate.x = fminf(gate.x, swiglu_limit);
-                        gate.y = fminf(gate.y, swiglu_limit);
-                        up.x = fminf(fmaxf(up.x, -swiglu_limit), swiglu_limit);
-                        up.y = fminf(fmaxf(up.y, -swiglu_limit), swiglu_limit);
-                        const float sigmoid_x = 1.0f / (1.0f + __expf(-gate.x));
-                        const float sigmoid_y = 1.0f / (1.0f + __expf(-gate.y));
-                        hidden_pairs[i] = __floats2bfloat162_rn(
-                            gate.x * sigmoid_x * up.x,
-                            gate.y * sigmoid_y * up.y
-                        );
-                    }
-                } else {
-                    rt_fl<config::SWIGLU_Mb / config::NUM_WARPS, config::SWIGLU_Nb> gate, up, denominator;
-                    compute_group::load(gate, gate_smem[stage]);
-                    compute_group::load(up, up_smem[stage]);
-                    compute_group::mul(denominator, gate, -1.0f);
-                    compute_group::exp(denominator, denominator);
-                    compute_group::add(denominator, denominator, 1.0f);
-                    compute_group::div(gate, gate, denominator);
-                    compute_group::mul(gate, gate, up);
-                    if (threadIdx.x == 0) tma::store_async_read_wait();
-                    __syncthreads();
-                    compute_group::store(hidden_smem, gate);
+                    compute_group::min(gate, gate, swiglu_limit);
+                    compute_group::max(up, up, -swiglu_limit);
+                    compute_group::min(up, up, swiglu_limit);
                 }
+                compute_group::mul(denominator, gate, -1.0f);
+                compute_group::exp(denominator, denominator);
+                compute_group::add(denominator, denominator, 1.0f);
+                compute_group::div(gate, gate, denominator);
+                compute_group::mul(gate, gate, up);
+                if (threadIdx.x == 0) tma::store_async_read_wait();
+                __syncthreads();
+                compute_group::store(hidden_smem, gate);
             } else {
                 const auto *gate_pairs = reinterpret_cast<const bf16_2 *>(gate_smem[stage].data);
                 const auto *up_pairs = reinterpret_cast<const bf16_2 *>(up_smem[stage].data);
