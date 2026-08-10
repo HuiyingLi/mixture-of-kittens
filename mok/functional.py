@@ -27,7 +27,6 @@ class MoKConfig:
     macrobatch_size: int = 131072
     schedule_capacity_multiplier: float = 0.5
     all_gather_top_experts_chunk_bytes: int = 2048
-    swiglu_limit: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,12 +117,6 @@ def validate_workspace_args(
         or config.schedule_capacity_multiplier <= 0
     ):
         raise ValueError("schedule_capacity_multiplier must be a positive finite number")
-    if (
-        type(config.swiglu_limit) not in (int, float)
-        or not math.isfinite(config.swiglu_limit)
-        or config.swiglu_limit < 0
-    ):
-        raise ValueError("swiglu_limit must be a non-negative finite number")
     if not dist.is_initialized():
         raise RuntimeError("torch.distributed must be initialized")
     if not isinstance(group, dist.ProcessGroup):
@@ -490,6 +483,7 @@ def forward(
     routed_gate_weights: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
     routed_up_weights: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
     routed_down_weights: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+    swiglu_limit: float | None = None,
 ) -> tuple[
     torch.Tensor,
     MoKForwardContext,
@@ -508,14 +502,13 @@ def forward(
         routed_gate_weights: bfloat16 [num_local_experts, intermediate_size, hidden_size] or MXFP8 data/scale tuple
         routed_up_weights:   bfloat16 [num_local_experts, intermediate_size, hidden_size] or MXFP8 data/scale tuple
         routed_down_weights: bfloat16 [num_local_experts, hidden_size, intermediate_size] or MXFP8 data/scale tuple
+        swiglu_limit:        float | None
 
     Outputs:
         output:          bfloat16 [num_local_tokens, hidden_size]
         forward_context: MoKForwardContext
     """
     validate_inputs(config, workspace, schedule, x, router_weights)
-    if isinstance(routed_gate_weights, tuple) and config.swiglu_limit > 0.0:
-        raise ValueError("clamped SwiGLU is currently supported only with BF16 routed experts")
 
     workspace.x_buffer.copy_(x)  # TODO: we can remove this
     workspace.router_weight_buffer.copy_(router_weights)
@@ -538,7 +531,7 @@ def forward(
             shared_down_weights, routed_down_weights_fp8, routed_down_weights_sc,
             schedule.peer_rank, schedule.peer_token_idx,
             schedule.num_tokens, schedule.tokens_per_expert,
-            workspace.topk, config.fwd_num_comm_sms,
+            workspace.topk, swiglu_limit, config.fwd_num_comm_sms,
             config.macrobatch_size, config.minibatch_size,
         )
         forward_context = MoKForwardContext(
@@ -560,8 +553,8 @@ def forward(
             shared_down_weights, routed_down_weights,
             schedule.peer_rank, schedule.peer_token_idx,
             schedule.num_tokens, schedule.tokens_per_expert,
-            workspace.topk, config.fwd_num_comm_sms,
-            config.macrobatch_size, config.minibatch_size, config.swiglu_limit,
+            workspace.topk, swiglu_limit, config.fwd_num_comm_sms,
+            config.macrobatch_size, config.minibatch_size,
         )
         forward_context = MoKForwardContext(
             x_routed=x_routed,
@@ -593,6 +586,7 @@ def backward(
     routed_gate_weights: torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
     routed_up_weights: torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
     routed_down_weights: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+    swiglu_limit: float | None = None,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -619,6 +613,7 @@ def backward(
         routed_gate_weights: bfloat16 [num_local_experts, intermediate_size, hidden_size] or MXFP8 tensor tuple
         routed_up_weights:   bfloat16 [num_local_experts, intermediate_size, hidden_size] or MXFP8 tensor tuple
         routed_down_weights: bfloat16 [num_local_experts, hidden_size, intermediate_size] or MXFP8 tensor tuple
+        swiglu_limit:        float | None
 
     Outputs:
         d_x:                   bfloat16 [num_local_tokens, hidden_size]
@@ -633,8 +628,6 @@ def backward(
     validate_inputs(config, workspace, schedule, x, router_weights, grad_output)
     if not isinstance(forward_context, MoKForwardContext):
         raise TypeError("forward_context must be a MoKForwardContext")
-    if isinstance(routed_gate_weights, tuple) and config.swiglu_limit > 0.0:
-        raise ValueError("clamped SwiGLU is currently supported only with BF16 routed experts")
 
     workspace.d_y_buffer.copy_(grad_output)                # TODO: we can remove this
     workspace.x_buffer.copy_(x)                            # TODO: we can remove this
@@ -673,7 +666,7 @@ def backward(
             routed_up_weights_fp8, routed_up_weights_sc,
             schedule.peer_rank, schedule.peer_token_idx,
             schedule.num_tokens, schedule.tokens_per_expert,
-            workspace.topk, config.bwd_num_comm_sms,
+            workspace.topk, swiglu_limit, config.bwd_num_comm_sms,
             config.macrobatch_size, config.minibatch_size,
         )
     else:
@@ -698,8 +691,8 @@ def backward(
             workspace.x_buffer, workspace.x_buffer_ptrs,
             schedule.peer_rank, schedule.peer_token_idx,
             schedule.num_tokens, schedule.tokens_per_expert,
-            workspace.topk, config.bwd_num_comm_sms,
-            config.macrobatch_size, config.minibatch_size, config.swiglu_limit,
+            workspace.topk, swiglu_limit, config.bwd_num_comm_sms,
+            config.macrobatch_size, config.minibatch_size,
         )
 
     barrier_all(workspace.barrier_buffer, workspace.barrier_buffer_ptrs,

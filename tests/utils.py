@@ -37,6 +37,13 @@ def mok_params() -> tuple[tuple[str, int, int, int, int], ...]:
     )
 
 
+def swiglu_params() -> tuple[tuple[str, float | None], ...]:
+    return (
+        ("Unclamped SwiGLU", None),
+        ("Clamped SwiGLU", 0.25),
+    )
+
+
 def generate_topk_experts(
     rank: int,
     device: torch.device,
@@ -217,15 +224,15 @@ def run_mxfp8_quantize_reference(
 def run_swiglu_reference(
     gate: torch.Tensor,
     up: torch.Tensor,
-    swiglu_limit: float = 0.0,
+    swiglu_limit: float | None = None,
 ) -> torch.Tensor:
-    """Evaluate ordinary or DSV4-style clamped SwiGLU."""
-    if swiglu_limit <= 0.0:
+    if swiglu_limit is None:
         return torch.nn.functional.silu(gate) * up
-    dtype = gate.dtype
-    gate_fp32 = gate.float().clamp(max=swiglu_limit)
-    up_fp32 = up.float().clamp(min=-swiglu_limit, max=swiglu_limit)
-    return (torch.nn.functional.silu(gate_fp32) * up_fp32).to(dtype)
+    else:
+        dtype = gate.dtype
+        gate_fp32 = gate.float().clamp(max=swiglu_limit)
+        up_fp32 = up.float().clamp(min=-swiglu_limit, max=swiglu_limit)
+        return (torch.nn.functional.silu(gate_fp32) * up_fp32).to(dtype)
 
 
 def run_forward_reference_bf16(
@@ -237,7 +244,7 @@ def run_forward_reference_bf16(
     w_routed_gate: torch.Tensor,  # [E, I, H]
     w_routed_up: torch.Tensor,    # [E, I, H]
     w_routed_down: torch.Tensor,  # [E, H, I]
-    swiglu_limit: float = 0.0,
+    swiglu_limit: float | None = None,
 ) -> tuple[
     torch.Tensor,  # combine_buffer
     torch.Tensor,  # gate_shared
@@ -321,7 +328,7 @@ def run_reference_bf16(
     w_routed_up: torch.Tensor,     # [E, I, H]
     w_routed_down: torch.Tensor,   # [E, H, I]
     d_output: torch.Tensor,        # [T, H]
-    swiglu_limit: float = 0.0,
+    swiglu_limit: float | None = None,
 ) -> tuple[
     torch.Tensor,  # output
     torch.Tensor,  # d_x

@@ -1,5 +1,3 @@
-import math
-
 import torch
 
 from . import _C
@@ -213,6 +211,7 @@ def dispatch_mlp_swiglu_combine_fwd_mxfp8(
     num_tokens: torch.Tensor,
     tokens_per_expert: torch.Tensor,
     topk: int,
+    swiglu_limit: float | None,
     num_comm_sms: int,
     macrobatch_size: int,
     minibatch_size: int,
@@ -252,6 +251,7 @@ def dispatch_mlp_swiglu_combine_fwd_mxfp8(
         num_tokens:              int32 [1]
         tokens_per_expert:       int32 [num_local_experts]
         topk:                    int
+        swiglu_limit:            float | None
         num_comm_sms:            int
         macrobatch_size:         int
         minibatch_size:          int
@@ -280,6 +280,8 @@ def dispatch_mlp_swiglu_combine_fwd_mxfp8(
         raise ValueError("hidden_size must be positive and divisible by 256")
     if type(topk) is not int or not 0 < topk <= 255:
         raise ValueError("topk must be an integer in [1, 255]")
+    if swiglu_limit is not None and (type(swiglu_limit) not in (int, float) or swiglu_limit < 0):
+        raise ValueError("swiglu_limit must be None or a non-negative number")
     if type(num_comm_sms) is not int or num_comm_sms <= 0 or num_comm_sms % 2 != 0:
         raise ValueError("num_comm_sms must be a positive even integer")
     if (type(minibatch_size) is not int or minibatch_size <= 0
@@ -362,7 +364,7 @@ def dispatch_mlp_swiglu_combine_fwd_mxfp8(
         w_shared_up, w_routed_up, w_routed_up_sc,
         w_shared_down, w_routed_down, w_routed_down_sc,
         schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-        topk, num_comm_sms, macrobatch_size, minibatch_size,
+        topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size,
     )
 
 
@@ -383,10 +385,10 @@ def dispatch_mlp_swiglu_combine_fwd_bf16(
     num_tokens: torch.Tensor,
     tokens_per_expert: torch.Tensor,
     topk: int,
+    swiglu_limit: float | None,
     num_comm_sms: int,
     macrobatch_size: int,
     minibatch_size: int,
-    swiglu_limit: float = 0.0,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -416,12 +418,10 @@ def dispatch_mlp_swiglu_combine_fwd_bf16(
         num_tokens:              int32 [1]
         tokens_per_expert:       int32 [num_local_experts]
         topk:                    int
+        swiglu_limit:            float | None
         num_comm_sms:            int
         macrobatch_size:         int
         minibatch_size:          int
-        swiglu_limit:            float; zero selects ordinary SwiGLU, while a
-            positive value clamps the gate at its upper bound and the up
-            projection symmetrically before evaluating SwiGLU in FP32.
 
     Outputs:
         x_routed:      bfloat16 [macrobatch_size, hidden_size]
@@ -451,14 +451,14 @@ def dispatch_mlp_swiglu_combine_fwd_bf16(
     num_local_experts = w_routed_gate.shape[0]
     if type(topk) is not int or not 0 < topk <= 255:
         raise ValueError("topk must be an integer in [1, 255]")
+    if swiglu_limit is not None and (type(swiglu_limit) not in (int, float) or swiglu_limit < 0):
+        raise ValueError("swiglu_limit must be None or a non-negative number")
     if type(num_comm_sms) is not int or num_comm_sms <= 0 or num_comm_sms % 2 != 0:
         raise ValueError("num_comm_sms must be a positive even integer")
     if type(minibatch_size) is not int or minibatch_size <= 0 or minibatch_size % 256 != 0:
         raise ValueError("minibatch_size must be positive and divisible by 256")
     if type(macrobatch_size) is not int or macrobatch_size <= 0 or macrobatch_size % minibatch_size != 0:
         raise ValueError("macrobatch_size must be a positive multiple of minibatch_size")
-    if type(swiglu_limit) not in (int, float) or not math.isfinite(swiglu_limit) or swiglu_limit < 0:
-        raise ValueError("swiglu_limit must be a non-negative finite number")
     for pointer_name, pointers in (("x_ptrs", x_ptrs), ("combine_buffer_ptrs", combine_buffer_ptrs)):
         if not isinstance(pointers, list) or any(
             type(pointer) is not int or pointer <= 0 for pointer in pointers
@@ -510,7 +510,7 @@ def dispatch_mlp_swiglu_combine_fwd_bf16(
         w_shared_gate, w_routed_gate, w_shared_up, w_routed_up,
         w_shared_down, w_routed_down,
         schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-        topk, num_comm_sms, macrobatch_size, minibatch_size, swiglu_limit,
+        topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size,
     )
 
 
@@ -561,6 +561,7 @@ def dispatch_mlp_swiglu_combine_bwd_mxfp8(
     num_tokens: torch.Tensor,
     tokens_per_expert: torch.Tensor,
     topk: int,
+    swiglu_limit: float | None,
     num_comm_sms: int,
     macrobatch_size: int,
     minibatch_size: int,
@@ -626,6 +627,7 @@ def dispatch_mlp_swiglu_combine_bwd_mxfp8(
         num_tokens:                    int32 [1]
         tokens_per_expert:             int32 [num_local_experts]
         topk:                          int
+        swiglu_limit:                  float | None
         num_comm_sms:                  int
         macrobatch_size:               int
         minibatch_size:                int
@@ -659,6 +661,8 @@ def dispatch_mlp_swiglu_combine_bwd_mxfp8(
         raise ValueError("hidden_size must be positive and divisible by 256")
     if type(topk) is not int or not 0 < topk <= 255:
         raise ValueError("topk must be an integer in [1, 255]")
+    if swiglu_limit is not None and (type(swiglu_limit) not in (int, float) or swiglu_limit < 0):
+        raise ValueError("swiglu_limit must be None or a non-negative number")
     if type(num_comm_sms) is not int or num_comm_sms <= 0 or num_comm_sms % 2 != 0:
         raise ValueError("num_comm_sms must be a positive even integer")
     if (type(minibatch_size) is not int or minibatch_size <= 0
@@ -800,7 +804,7 @@ def dispatch_mlp_swiglu_combine_bwd_mxfp8(
         hidden_shared, hidden_fp8_t_routed, hidden_sc_t_routed,
         x, x_ptrs, w_routed_gate, w_routed_gate_sc, w_routed_up, w_routed_up_sc,
         schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-        topk, num_comm_sms, macrobatch_size, minibatch_size,
+        topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size,
     )
 
 
@@ -837,10 +841,10 @@ def dispatch_mlp_swiglu_combine_bwd_bf16(
     num_tokens: torch.Tensor,
     tokens_per_expert: torch.Tensor,
     topk: int,
+    swiglu_limit: float | None,
     num_comm_sms: int,
     macrobatch_size: int,
     minibatch_size: int,
-    swiglu_limit: float = 0.0,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -889,12 +893,10 @@ def dispatch_mlp_swiglu_combine_bwd_bf16(
         num_tokens:                    int32 [1]
         tokens_per_expert:             int32 [num_local_experts]
         topk:                          int
+        swiglu_limit:                  float | None
         num_comm_sms:                  int
         macrobatch_size:               int
         minibatch_size:                int
-        swiglu_limit:                  float; zero selects ordinary SwiGLU,
-            while a positive value applies the same FP32 clamps used by the
-            corresponding forward pass.
 
     Outputs:
         d_x_shared:      bfloat16 [num_local_tokens, hidden_size]
@@ -930,14 +932,14 @@ def dispatch_mlp_swiglu_combine_bwd_bf16(
     num_local_experts = w_routed_gate.shape[0]
     if type(topk) is not int or not 0 < topk <= 255:
         raise ValueError("topk must be an integer in [1, 255]")
+    if swiglu_limit is not None and (type(swiglu_limit) not in (int, float) or swiglu_limit < 0):
+        raise ValueError("swiglu_limit must be None or a non-negative number")
     if type(num_comm_sms) is not int or num_comm_sms <= 0 or num_comm_sms % 2 != 0:
         raise ValueError("num_comm_sms must be a positive even integer")
     if type(minibatch_size) is not int or minibatch_size <= 0 or minibatch_size % 256 != 0:
         raise ValueError("minibatch_size must be positive and divisible by 256")
     if type(macrobatch_size) is not int or macrobatch_size <= 0 or macrobatch_size % minibatch_size != 0:
         raise ValueError("macrobatch_size must be a positive multiple of minibatch_size")
-    if type(swiglu_limit) not in (int, float) or not math.isfinite(swiglu_limit) or swiglu_limit < 0:
-        raise ValueError("swiglu_limit must be a non-negative finite number")
     pointer_lists = (
         ("d_y_buffer_ptrs", d_y_buffer_ptrs),
         ("d_x_routed_buffer_ptrs", d_x_routed_buffer_ptrs),
@@ -1002,7 +1004,7 @@ def dispatch_mlp_swiglu_combine_bwd_bf16(
         hidden_shared, hidden_routed,
         x, x_ptrs,
         schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-        topk, num_comm_sms, macrobatch_size, minibatch_size, swiglu_limit,
+        topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size,
     )
 
 
