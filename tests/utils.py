@@ -40,7 +40,7 @@ def mok_params() -> tuple[tuple[str, int, int, int, int], ...]:
 def swiglu_params() -> tuple[tuple[str, float | None], ...]:
     return (
         ("Unclamped SwiGLU", None),
-        ("Clamped SwiGLU", 0.25),
+        ("Clamped SwiGLU", 4.0),
     )
 
 
